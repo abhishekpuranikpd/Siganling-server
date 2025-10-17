@@ -27,5 +27,5 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => console.log("disconnected:", socket.id));
 });
 
-const PORT = 4000;
+const PORT = process.env.PORT;
 server.listen(PORT, () => console.log(`Signaling server running on ${PORT}`));
