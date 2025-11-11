@@ -1,4 +1,4 @@
-// signaling-server.js
+// signaling-server/index.js
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -6,6 +6,18 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
+
+// In-memory user presence tracker: userId => { online: true/false, lastSeen: <ISO string> }
+const userPresence = {};
+
+// Helper: Send presence status for array of userIds to a socket
+function sendPresence(socket, userIds) {
+  const res = {};
+  userIds.forEach(uid => {
+    res[uid] = userPresence[uid] || { online: false, lastSeen: null };
+  });
+  socket.emit("presence", res);
+}
 
 io.on("connection", (socket) => {
   console.log("Socket connected:", socket.id);
@@ -15,9 +27,15 @@ io.on("connection", (socket) => {
     if (userId) {
       socket.join("user-" + userId);
       socket.userId = userId;
+      userPresence[userId] = { online: true, lastSeen: null };
       io.to("user-" + userId).emit("user-online", { userId });
       console.log(`User room joined: user-${userId}`);
     }
+  });
+
+  // --- PRESENCE: Respond to explicit presence queries
+  socket.on("get-presence", ({ userIds }) => {
+    if (Array.isArray(userIds)) sendPresence(socket, userIds);
   });
 
   // --- CHAT ROOMS
@@ -36,7 +54,7 @@ io.on("connection", (socket) => {
   // --- NEW CHAT (sidebar real-time)
   socket.on("new-chat", ({ userIds, chat }) => {
     if (Array.isArray(userIds)) {
-      userIds.forEach(uid => {
+      userIds.forEach((uid) => {
         io.to("user-" + uid).emit("new-chat", chat);
         console.log(`Notified user-${uid} about new chat ${chat?.id || ""}`);
       });
@@ -48,6 +66,18 @@ io.on("connection", (socket) => {
     if (msg && msg.roomId) {
       io.to(msg.roomId).emit("chat-message", msg);
       console.log("Message sent to room", msg.roomId);
+
+      // ✅ Notify other users in chat about unread increment
+      if (msg.recipients && Array.isArray(msg.recipients)) {
+        msg.recipients
+          .filter((uid) => uid !== msg.senderId)
+          .forEach((uid) => {
+            io.to("user-" + uid).emit("update-unread", {
+              chatId: msg.roomId,
+              increment: 1,
+            });
+          });
+      }
     }
   });
 
@@ -62,6 +92,10 @@ io.on("connection", (socket) => {
 
   socket.on("message-read", ({ roomId, userId, messageIds }) => {
     socket.to(roomId).emit("message-read", { userId, messageIds });
+    io.to("user-" + userId).emit("update-unread", {
+      chatId: roomId,
+      unreadCount: 0,
+    });
     console.log(`User ${userId} saw messages in room ${roomId}`);
   });
 
@@ -80,10 +114,19 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("signal", { type: "user-left", userId });
   });
 
+  // --- EXPLICIT UNREAD COUNT UPDATE SUPPORT
+  socket.on("update-unread", ({ chatId, userId, unreadCount }) => {
+    io.to("user-" + userId).emit("update-unread", { chatId, unreadCount });
+  });
+
   // --- CLEANUP / ONLINE-OFFLINE
   socket.on("disconnect", () => {
     if (socket.userId) {
-      io.to("user-" + socket.userId).emit("user-offline", { userId: socket.userId });
+      userPresence[socket.userId] = { online: false, lastSeen: new Date().toISOString() };
+      io.to("user-" + socket.userId).emit("user-offline", {
+        userId: socket.userId,
+        lastSeen: userPresence[socket.userId].lastSeen
+      });
     }
     console.log("Socket disconnected:", socket.id);
   });
