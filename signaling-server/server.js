@@ -1,4 +1,4 @@
-// signaling-server/index.js
+// signaling-server/server.js
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,32 @@ const io = new Server(server, { cors: { origin: "*" } });
 // In-memory user presence tracker: userId => { online: true/false, lastSeen: <ISO string> }
 const userPresence = {};
 
-// Helper: Send presence status for array of userIds to a socket
+// --- SYSTEM MESSAGES: Helper to emit a call event to the chat room and also as a direct notification
+function emitCallSystemMessage({ io, roomId, event, from, to, isVideo, timestamp }) {
+  const systemMsg = {
+    id: "sys-" + Date.now(),
+    type: "system", // or "call"
+    event, // "call-started", "call-accepted", "call-ended", "call-missed", etc.
+    from: from ? { id: from.id, name: from.name } : undefined,
+    to: to ? { id: to.id, name: to.name } : undefined,
+    isVideo,
+    timestamp: timestamp || new Date().toISOString(),
+    text: generateCallEventText(event, from, to, isVideo)
+  };
+  io.to(roomId).emit("chat-system-message", { roomId, message: systemMsg });
+}
+
+function generateCallEventText(event, from, to, isVideo) {
+  const callType = isVideo ? "video" : "audio";
+  switch(event) {
+    case "call-started": return `📞 ${from?.name || "Someone"} started a ${callType} call`;
+    case "call-accepted": return `✅ ${to?.name || "Someone"} accepted the call`;
+    case "call-ended": return `🚫 Call ended`;
+    case "call-missed": return `❌ Missed ${callType} call from ${from?.name || "someone"}`;
+    default: return "";
+  }
+}
+
 function sendPresence(socket, userIds) {
   const res = {};
   userIds.forEach(uid => {
@@ -99,7 +124,39 @@ io.on("connection", (socket) => {
     console.log(`User ${userId} saw messages in room ${roomId}`);
   });
 
-  // --- VIDEO SIGNALING
+  // --- CALL SIGNALING (WhatsApp style)
+  socket.on("call:request", ({ roomId, from, to, isVideo }) => {
+    if (to && to.id) {
+      io.to("user-" + to.id).emit("call:incoming", { from, isVideo, roomId });
+      emitCallSystemMessage({ io, roomId, event: "call-started", from, to, isVideo });
+      console.log(`User ${from?.id} is calling user ${to.id} (video: ${!!isVideo})`);
+    }
+  });
+
+  socket.on("call:accept", ({ roomId, from, to, isVideo }) => {
+    io.to(roomId).emit("call:accept", { from, isVideo });
+    emitCallSystemMessage({ io, roomId, event: "call-accepted", from, to, isVideo });
+    console.log(`Call accepted in room ${roomId}`);
+  });
+
+  socket.on("call:reject", ({ roomId, from, to, isVideo }) => {
+    io.to(roomId).emit("call:reject", { from, isVideo });
+    emitCallSystemMessage({ io, roomId, event: "call-missed", from, to, isVideo });
+    console.log(`Call rejected in room ${roomId}`);
+  });
+
+  socket.on("call:end", ({ roomId, from, to, isVideo }) => {
+    io.to(roomId).emit("call:end", { from, isVideo });
+    emitCallSystemMessage({ io, roomId, event: "call-ended", from, to, isVideo });
+    console.log(`Call ended in room ${roomId}`);
+  });
+
+  socket.on("call:missed", ({ roomId, from, to, isVideo }) => {
+    emitCallSystemMessage({ io, roomId, event: "call-missed", from, to, isVideo });
+    console.log(`Missed call in room ${roomId} (user ${to?.id || ''})`);
+  });
+
+  // --- VIDEO SIGNALING (WebRTC SDP/ICE)
   socket.on("join-room", ({ roomId, userId }) => {
     socket.join(roomId);
     socket.to(roomId).emit("signal", { type: "user-joined", userId });
